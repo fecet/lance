@@ -2117,7 +2117,7 @@ class LanceDataset(pa.dataset.Dataset):
     @staticmethod
     def commit(
         base_uri: Union[str, Path, LanceDataset],
-        operation: LanceOperation.BaseOperation,
+        operation: LanceOperation.BaseOperation | Transaction,
         read_version: Optional[int] = None,
         commit_lock: Optional[CommitLock] = None,
         storage_options: Optional[Dict[str, str]] = None,
@@ -2222,24 +2222,34 @@ class LanceDataset(pa.dataset.Dataset):
                     f"commit_lock must be a function, got {type(commit_lock)}"
                 )
 
-        if read_version is None and not isinstance(
-            operation, (LanceOperation.Overwrite, LanceOperation.Restore)
-        ):
-            raise ValueError(
-                "read_version is required for all operations except "
-                "Overwrite and Restore"
+        if isinstance(operation, Transaction):
+            new_ds = _Dataset.commit_transaction(
+                base_uri,
+                operation,
+                commit_lock,
+                storage_options=storage_options,
+                enable_v2_manifest_paths=enable_v2_manifest_paths,
+                detached=detached,
+                max_retries=max_retries,
             )
-
-        new_ds = _Dataset.commit(
-            base_uri,
-            operation._to_inner(),
-            read_version,
-            commit_lock,
-            storage_options=storage_options,
-            enable_v2_manifest_paths=enable_v2_manifest_paths,
-            detached=detached,
-            max_retries=max_retries,
-        )
+        else:
+            if read_version is None and not isinstance(
+                operation, (LanceOperation.Overwrite, LanceOperation.Restore)
+            ):
+                raise ValueError(
+                    "read_version is required for all operations except "
+                    "Overwrite and Restore"
+                )
+            new_ds = _Dataset.commit(
+                base_uri,
+                operation._to_inner(),
+                read_version,
+                commit_lock,
+                storage_options=storage_options,
+                enable_v2_manifest_paths=enable_v2_manifest_paths,
+                detached=detached,
+                max_retries=max_retries,
+            )
         ds = LanceDataset.__new__(LanceDataset)
         ds._storage_options = storage_options
         ds._ds = new_ds
