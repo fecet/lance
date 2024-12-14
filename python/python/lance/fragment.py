@@ -498,6 +498,7 @@ def write_fragments(
     data_storage_version: Optional[str] = None,
     use_legacy_format: Optional[bool] = None,
     storage_options: Optional[Dict[str, str]] = None,
+    enable_move_stable_row_ids: bool = False,
     with_blobs: bool = False,
 ) -> List[FragmentMetadata]:
     """
@@ -594,6 +595,7 @@ def write_fragments(
             progress=progress,
             data_storage_version=data_storage_version,
             storage_options=storage_options,
+            enable_move_stable_row_ids=enable_move_stable_row_ids,
         )
 
         return [FragmentMetadata.from_metadata(frag) for frag in default_fragments], [
@@ -610,5 +612,6 @@ def write_fragments(
         progress=progress,
         data_storage_version=data_storage_version,
         storage_options=storage_options,
+        enable_move_stable_row_ids=enable_move_stable_row_ids,
     )
     return [FragmentMetadata.from_metadata(frag) for frag in fragments]
