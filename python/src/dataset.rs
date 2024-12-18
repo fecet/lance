@@ -270,10 +270,10 @@ impl RewrittenIndex {
     }
 }
 
-
 fn update_schema(schema: &Schema, fragments: &[Fragment]) -> Option<Schema> {
     // 收集所有的 field.id 并去重
-    let mut all_field_ids: Vec<&i32> = fragments.iter()
+    let mut all_field_ids: Vec<&i32> = fragments
+        .iter()
         .flat_map(|fragment| &fragment.files)
         .flat_map(|file| &file.fields)
         .collect();
@@ -315,7 +315,7 @@ impl Operation {
 
         let op = LanceOperation::Overwrite {
             fragments,
-            schema:final_schema,
+            schema: final_schema,
             config_upsert_values: None,
         };
         Ok(Self(op))
@@ -1502,8 +1502,12 @@ impl Dataset {
             WriteDestination::Uri(dest.extract()?)
         };
 
-        let transaction =
-            Transaction::new(read_version.unwrap_or_default(), operation.0, blob_operation.0, None);
+        let transaction = Transaction::new(
+            read_version.unwrap_or_default(),
+            operation.0,
+            blob_operation.map(|op| op.0),
+            None,
+        );
 
         let mut builder = CommitBuilder::new(dest)
             .enable_v2_manifest_paths(enable_v2_manifest_paths.unwrap_or(false))
@@ -1528,7 +1532,6 @@ impl Dataset {
             uri,
         })
     }
-
 
     #[staticmethod]
     #[pyo3(signature = (dest, transactions, commit_lock = None, storage_options = None, enable_v2_manifest_paths = None, detached = None, max_retries = None))]
