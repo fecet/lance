@@ -4697,6 +4697,36 @@ def test_commit_message_and_get_properties(tmp_path):
     )
 
 
+def test_commit_with_stable_row_ids(tmp_path: Path):
+    """Test that commit() with enable_stable_row_ids creates stable row IDs."""
+    base_uri = str(tmp_path)
+    table = pa.table({"a": range(10)})
+
+    # Create dataset via commit with Overwrite and enable_stable_row_ids
+    fragments = lance.fragment.write_fragments(table, base_uri)
+    operation = lance.LanceOperation.Overwrite(table.schema, fragments)
+    ds = lance.LanceDataset.commit(
+        base_uri,
+        operation,
+        enable_stable_row_ids=True,
+    )
+
+    # Append more data
+    table2 = pa.table({"a": range(10, 20)})
+    fragments2 = lance.fragment.write_fragments(table2, base_uri)
+    ds = lance.LanceDataset.commit(
+        base_uri,
+        lance.LanceOperation.Append(fragments2),
+        read_version=ds.version,
+    )
+
+    # Verify row IDs are sequential (stable row IDs assign monotonic IDs)
+    result = ds.scanner(with_row_id=True).to_table()
+    assert len(result) == 20
+    row_ids = [result["_rowid"][i].as_py() for i in range(20)]
+    assert row_ids == list(range(20))
+
+
 def test_table_metadata_updates(tmp_path: Path):
     """Test table metadata incremental updates and full replacement."""
     arr = pa.array([1, 2, 3])

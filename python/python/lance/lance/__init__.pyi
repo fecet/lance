@@ -372,6 +372,7 @@ class _Dataset:
         enable_v2_manifest_paths: Optional[bool] = None,
         detached: Optional[bool] = None,
         max_retries: Optional[int] = None,
+        enable_stable_row_ids: Optional[bool] = None,
         **kwargs,
     ) -> _Dataset: ...
     @staticmethod
