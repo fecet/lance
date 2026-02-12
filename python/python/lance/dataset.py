@@ -3415,12 +3415,10 @@ class LanceDataset(pa.dataset.Dataset):
             A message to associate with this commit. This message will be stored in the
             dataset's metadata and can be retrieved using read_transaction().
         enable_stable_row_ids: bool, optional
-            If True, enables stable row IDs for the dataset.  Stable row IDs mean
-            that each row will have a unique id that is not based on its position
-            in the dataset.  Instead, a monotonically increasing id will be assigned
-            to each row as it is added to the dataset.  This is useful when building
-            indices or when rows need a persistent identity across compaction and
-            other maintenance operations.
+            If True, enables stable row IDs when creating a new dataset.  Stable
+            row IDs assign each row a monotonically increasing id that persists
+            across compaction and other maintenance operations.  This option is
+            ignored for existing datasets.
 
         Returns
         -------
