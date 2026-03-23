@@ -58,6 +58,7 @@ pub struct Transaction {
     pub operation: Operation,
     pub tag: Option<String>,
     pub transaction_properties: Option<Arc<HashMap<String, String>>>,
+    pub table_metadata_updates: Option<UpdateMap>,
 }
 
 #[derive(Debug, Clone, DeepSizeOf, PartialEq)]
@@ -1397,6 +1398,7 @@ pub struct TransactionBuilder {
     operation: Operation,
     tag: Option<String>,
     transaction_properties: Option<Arc<HashMap<String, String>>>,
+    table_metadata_updates: Option<UpdateMap>,
 }
 
 impl TransactionBuilder {
@@ -1407,6 +1409,7 @@ impl TransactionBuilder {
             operation,
             tag: None,
             transaction_properties: None,
+            table_metadata_updates: None,
         }
     }
 
@@ -1428,6 +1431,11 @@ impl TransactionBuilder {
         self
     }
 
+    pub fn table_metadata_updates(mut self, table_metadata_updates: Option<UpdateMap>) -> Self {
+        self.table_metadata_updates = table_metadata_updates;
+        self
+    }
+
     pub fn build(self) -> Transaction {
         let uuid = self
             .uuid
@@ -1438,6 +1446,7 @@ impl TransactionBuilder {
             operation: self.operation,
             tag: self.tag,
             transaction_properties: self.transaction_properties,
+            table_metadata_updates: self.table_metadata_updates,
         }
     }
 }
@@ -2221,6 +2230,13 @@ impl Transaction {
                 }
             }
             _ => {}
+        }
+
+        // Apply transaction-level table metadata updates (after operation-level)
+        if let Some(ref table_metadata_updates) = self.table_metadata_updates {
+            let mut table_metadata = manifest.table_metadata.clone();
+            apply_update_map(&mut table_metadata, table_metadata_updates);
+            manifest.table_metadata = table_metadata;
         }
 
         // Handle UpdateBases operation to update manifest base_paths
@@ -3008,6 +3024,10 @@ impl TryFrom<pb::Transaction> for Transaction {
             } else {
                 Some(Arc::new(message.transaction_properties))
             },
+            table_metadata_updates: message
+                .table_metadata_updates
+                .as_ref()
+                .map(UpdateMap::from),
         })
     }
 }
@@ -3275,6 +3295,10 @@ impl From<&Transaction> for pb::Transaction {
             operation: Some(operation),
             tag: value.tag.clone().unwrap_or("".to_string()),
             transaction_properties,
+            table_metadata_updates: value
+                .table_metadata_updates
+                .as_ref()
+                .map(pb::transaction::UpdateMap::from),
         }
     }
 }
