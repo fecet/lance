@@ -447,6 +447,7 @@ impl<'a> CommitBuilder<'a> {
             tag: None,
             //TODO: handle batch transaction merges in the future
             transaction_properties: None,
+            table_metadata_updates: None,
         };
         let dataset = self.execute(merged.clone()).await?;
         Ok(BatchCommitResult { dataset, merged })
@@ -510,6 +511,7 @@ mod tests {
             read_version,
             tag: None,
             transaction_properties: None,
+            table_metadata_updates: None,
         }
     }
 
@@ -758,6 +760,7 @@ mod tests {
             read_version: 1,
             tag: None,
             transaction_properties: None,
+            table_metadata_updates: None,
         };
         let res = CommitBuilder::new(dataset.clone())
             .execute_batch(vec![update_transaction])
