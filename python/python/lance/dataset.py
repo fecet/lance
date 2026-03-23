@@ -4461,6 +4461,7 @@ class Transaction:
     transaction_properties: Optional[Dict[str, str]] = dataclasses.field(
         default_factory=dict
     )
+    table_metadata_updates: Optional[LanceOperation.UpdateMap] = None
 
 
 class Tag(TypedDict):
