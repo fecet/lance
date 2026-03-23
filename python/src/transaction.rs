@@ -604,12 +604,18 @@ impl FromPyObject<'_> for PyLance<Transaction> {
             .extract::<Option<HashMap<String, String>>>()?
             .filter(|map| !map.is_empty())
             .map(Arc::new);
+        let table_metadata_updates = ob
+            .getattr("table_metadata_updates")
+            .ok()
+            .and_then(|attr| extract_update_map(&attr).ok())
+            .flatten();
         Ok(Self(Transaction {
             read_version,
             uuid,
             operation,
             tag: None,
             transaction_properties,
+            table_metadata_updates,
         }))
     }
 }
@@ -637,6 +643,10 @@ impl<'py> IntoPyObject<'py> for PyLance<&Transaction> {
         if let Some(transaction_properties_arc) = &self.0.transaction_properties {
             let py_dict = transaction_properties_arc.as_ref().into_pyobject(py)?;
             py_transaction.setattr("transaction_properties", py_dict)?;
+        }
+        if let Some(ref table_metadata_updates) = self.0.table_metadata_updates {
+            let py_map = export_update_map(py, &Some(table_metadata_updates.clone()))?;
+            py_transaction.setattr("table_metadata_updates", py_map)?;
         }
         // Unwrap due to infallible
         Ok(py_transaction.into_pyobject(py).unwrap())

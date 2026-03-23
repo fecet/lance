@@ -33,6 +33,12 @@ message Transaction {
   // __lance_commit_message is a reserved key
   map<string, string> transaction_properties = 4;
 
+  // Optional table metadata updates applied atomically with the operation.
+  // When present, these updates are merged into the manifest's table_metadata
+  // after the operation-level metadata handling (e.g., UpdateConfig).
+  // When absent, no table metadata changes are made at the transaction level.
+  optional UpdateMap table_metadata_updates = 5;
+
   // Add new rows to the dataset.
   message Append {
     // The new fragments to append.
