@@ -109,6 +109,21 @@ pub struct UpdateMap {
     pub replace: bool,
 }
 
+impl UpdateMap {
+    /// Check whether two UpdateMaps touch any of the same keys.
+    pub fn keys_overlap(&self, other: &Self) -> bool {
+        let self_keys: std::collections::HashSet<&str> = self
+            .update_entries
+            .iter()
+            .map(|e| e.key.as_str())
+            .collect();
+        other
+            .update_entries
+            .iter()
+            .any(|e| self_keys.contains(e.key.as_str()))
+    }
+}
+
 /// An operation on a dataset.
 #[derive(Debug, Clone, DeepSizeOf)]
 pub enum Operation {
@@ -1223,16 +1238,23 @@ impl Operation {
         match (self, other) {
             (
                 Self::UpdateConfig {
+                    table_metadata_updates,
                     schema_metadata_updates,
                     field_metadata_updates,
                     ..
                 },
                 Self::UpdateConfig {
+                    table_metadata_updates: other_table_metadata,
                     schema_metadata_updates: other_schema_metadata,
                     field_metadata_updates: other_field_metadata,
                     ..
                 },
             ) => {
+                if let (Some(a), Some(b)) = (table_metadata_updates, other_table_metadata) {
+                    if a.keys_overlap(b) {
+                        return true;
+                    }
+                }
                 if schema_metadata_updates.is_some() && other_schema_metadata.is_some() {
                     return true;
                 }

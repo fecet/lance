@@ -222,7 +222,19 @@ impl<'a> TransactionRebase<'a> {
             Operation::UpdateBases { .. } => {
                 self.check_add_bases_txn(other_transaction, other_version)
             }
+        }?;
+
+        // Check transaction-level table_metadata_updates key overlap
+        if let (Some(self_updates), Some(other_updates)) = (
+            &self.transaction.table_metadata_updates,
+            &other_transaction.table_metadata_updates,
+        ) {
+            if self_updates.keys_overlap(other_updates) {
+                return Err(self.incompatible_conflict_err(other_transaction, other_version));
+            }
         }
+
+        Ok(())
     }
 
     fn check_delete_txn(
@@ -1692,7 +1704,10 @@ mod tests {
     use lance_table::io::deletion::{deletion_file_path, read_deletion_file};
 
     use super::*;
-    use crate::dataset::transaction::{DataReplacementGroup, RewriteGroup};
+    use crate::dataset::transaction::{
+        DataReplacementGroup, RewriteGroup, UpdateMap, UpdateMapEntry,
+    };
+    use rstest::rstest;
     use crate::dataset::write::WriteMode;
     use crate::session::caches::DeletionFileKey;
     use crate::{
@@ -3605,5 +3620,49 @@ mod tests {
         );
 
         assert_eq!(dataset_v2.count_rows(None).await.unwrap(), 5);
+    }
+
+    #[rstest]
+    #[case::disjoint_keys("cursor.producer-0", "cursor.producer-1", true)]
+    #[case::overlapping_keys("cursor.producer-0", "cursor.producer-0", false)]
+    #[tokio::test]
+    async fn test_table_metadata_key_conflict(
+        #[case] key1: &str,
+        #[case] key2: &str,
+        #[case] expect_ok: bool,
+    ) {
+        let dataset = test_dataset(5, 1).await;
+
+        let mut txn1 = Transaction::new_from_version(
+            1,
+            Operation::Append {
+                fragments: vec![],
+            },
+        );
+        txn1.table_metadata_updates = Some(UpdateMap {
+            update_entries: vec![UpdateMapEntry::from((key1, "100"))],
+            replace: false,
+        });
+
+        let mut txn2 = Transaction::new_from_version(
+            1,
+            Operation::Append {
+                fragments: vec![],
+            },
+        );
+        txn2.table_metadata_updates = Some(UpdateMap {
+            update_entries: vec![UpdateMapEntry::from((key2, "200"))],
+            replace: false,
+        });
+
+        let mut rebase = TransactionRebase::try_new(&dataset, txn1, None)
+            .await
+            .unwrap();
+        let result = rebase.check_txn(&txn2, 2);
+        if expect_ok {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(result, Err(Error::IncompatibleTransaction { .. })));
+        }
     }
 }
