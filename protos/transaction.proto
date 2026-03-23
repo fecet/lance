@@ -248,6 +248,12 @@ message Transaction {
     // Filter for checking existence of keys in newly inserted rows, used for conflict detection.
     // Only tracks keys from INSERT operations during merge insert, not updates.
     optional KeyExistenceFilter inserted_rows = 8;
+    // Atomic updates to `manifest.table_metadata`, applied alongside the row
+    // changes in this Update commit. Intended for user-constructed Update
+    // transactions that bundle a small durable slot (e.g. a consumer cursor)
+    // with the data they produce, avoiding a separate UpdateConfig round-trip.
+    // Lance's internal write paths (`update`, `merge_insert`) leave this unset.
+    optional UpdateMap table_metadata_updates = 9;
   }
 
   // The mode of update operation

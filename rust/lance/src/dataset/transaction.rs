@@ -108,6 +108,22 @@ pub struct UpdateMap {
     pub replace: bool,
 }
 
+impl UpdateMap {
+    /// Any `replace: true` wipes the target, so it conflicts with everything;
+    /// otherwise two maps conflict when they touch the same key.
+    pub(crate) fn conflicts_with(&self, other: &Self) -> bool {
+        if self.replace || other.replace {
+            return true;
+        }
+        let self_keys: std::collections::HashSet<&str> =
+            self.update_entries.iter().map(|e| e.key.as_str()).collect();
+        other
+            .update_entries
+            .iter()
+            .any(|e| self_keys.contains(e.key.as_str()))
+    }
+}
+
 /// An operation on a dataset.
 #[derive(Debug, Clone, DeepSizeOf)]
 pub enum Operation {
@@ -222,6 +238,12 @@ pub enum Operation {
         /// Optional filter for detecting conflicts on inserted row keys.
         /// Only tracks keys from INSERT operations during merge insert, not updates.
         inserted_rows_filter: Option<KeyExistenceFilter>,
+        /// Atomic updates to `manifest.table_metadata`, applied alongside the
+        /// row changes in this commit. Lance's internal write paths
+        /// (`merge_insert`, `update`) leave this `None`; user-constructed
+        /// Update commits may set it to bundle a small durable slot (e.g. a
+        /// consumer cursor) with the data they produce.
+        table_metadata_updates: Option<UpdateMap>,
     },
 
     /// Project to a new schema. This only changes the schema, not the data.
@@ -421,6 +443,7 @@ impl PartialEq for Operation {
                     fields_for_preserving_frag_bitmap: a_fields_for_preserving_frag_bitmap,
                     update_mode: a_update_mode,
                     inserted_rows_filter: a_inserted_rows_filter,
+                    table_metadata_updates: a_table_metadata_updates,
                 },
                 Self::Update {
                     removed_fragment_ids: b_removed,
@@ -431,6 +454,7 @@ impl PartialEq for Operation {
                     fields_for_preserving_frag_bitmap: b_fields_for_preserving_frag_bitmap,
                     update_mode: b_update_mode,
                     inserted_rows_filter: b_inserted_rows_filter,
+                    table_metadata_updates: b_table_metadata_updates,
                 },
             ) => {
                 compare_vec(a_removed, b_removed)
@@ -444,6 +468,7 @@ impl PartialEq for Operation {
                     )
                     && a_update_mode == b_update_mode
                     && a_inserted_rows_filter == b_inserted_rows_filter
+                    && a_table_metadata_updates == b_table_metadata_updates
             }
             (Self::Project { schema: a }, Self::Project { schema: b }) => a == b,
             (
@@ -1219,6 +1244,9 @@ impl Operation {
     }
 
     pub(crate) fn modifies_same_metadata(&self, other: &Self) -> bool {
+        // `table_metadata_updates` collisions are handled centrally in
+        // `TransactionRebase::check_txn`, since both `Update` and
+        // `UpdateConfig` can carry them and must be compared across kinds.
         match (self, other) {
             (
                 Self::UpdateConfig {
@@ -2220,6 +2248,14 @@ impl Transaction {
                     }
                 }
             }
+            Operation::Update {
+                table_metadata_updates: Some(table_metadata_updates),
+                ..
+            } => {
+                let mut table_metadata = manifest.table_metadata.clone();
+                apply_update_map(&mut table_metadata, table_metadata_updates);
+                manifest.table_metadata = table_metadata;
+            }
             _ => {}
         }
 
@@ -2857,6 +2893,7 @@ impl TryFrom<pb::Transaction> for Transaction {
                 fields_for_preserving_frag_bitmap,
                 update_mode,
                 inserted_rows,
+                table_metadata_updates,
             })) => Operation::Update {
                 removed_fragment_ids,
                 updated_fragments: updated_fragments
@@ -2881,6 +2918,7 @@ impl TryFrom<pb::Transaction> for Transaction {
                 inserted_rows_filter: inserted_rows
                     .map(|ik| KeyExistenceFilter::try_from(&ik))
                     .transpose()?,
+                table_metadata_updates: table_metadata_updates.as_ref().map(UpdateMap::from),
             },
             Some(pb::transaction::Operation::Project(pb::transaction::Project { schema })) => {
                 Operation::Project {
@@ -3183,6 +3221,7 @@ impl From<&Transaction> for pb::Transaction {
                 fields_for_preserving_frag_bitmap,
                 update_mode,
                 inserted_rows_filter,
+                table_metadata_updates,
             } => pb::transaction::Operation::Update(pb::transaction::Update {
                 removed_fragment_ids: removed_fragment_ids.clone(),
                 updated_fragments: updated_fragments
@@ -3196,6 +3235,9 @@ impl From<&Transaction> for pb::Transaction {
                     .map(pb::MergedGeneration::from)
                     .collect(),
                 fields_for_preserving_frag_bitmap: fields_for_preserving_frag_bitmap.clone(),
+                table_metadata_updates: table_metadata_updates
+                    .as_ref()
+                    .map(pb::transaction::UpdateMap::from),
                 update_mode: update_mode
                     .as_ref()
                     .map(|mode| match mode {

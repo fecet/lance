@@ -7,7 +7,7 @@ use crate::index::mem_wal::{load_mem_wal_index_details, new_mem_wal_index_meta};
 use crate::io::deletion::read_dataset_deletion_file;
 use crate::{
     Dataset,
-    dataset::transaction::{Operation, Transaction},
+    dataset::transaction::{Operation, Transaction, UpdateMap},
 };
 use futures::{StreamExt, TryStreamExt};
 use lance_core::utils::mask::RowSetOps;
@@ -192,6 +192,19 @@ impl<'a> TransactionRebase<'a> {
     /// return Ok(()).
     pub fn check_txn(&mut self, other_transaction: &Transaction, other_version: u64) -> Result<()> {
         let op = &self.transaction.operation;
+        // Run metadata-key conflict detection before per-op checks: those may
+        // early-return `RetryableCommitConflict` on row/fragment conflicts,
+        // and a retry on a `table_metadata` collision would silently
+        // rebase-overwrite the loser's slot instead of surfacing an
+        // incompatible conflict.
+        if let Some(self_updates) = operation_table_metadata_updates(&self.transaction.operation)
+            && let Some(other_updates) =
+                operation_table_metadata_updates(&other_transaction.operation)
+            && self_updates.conflicts_with(other_updates)
+        {
+            return Err(self.incompatible_conflict_err(other_transaction, other_version));
+        }
+
         match op {
             Operation::Delete { .. } => self.check_delete_txn(other_transaction, other_version),
             Operation::Update { .. } => self.check_update_txn(other_transaction, other_version),
@@ -1677,6 +1690,23 @@ fn wrong_operation_err(op: &Operation) -> Error {
     Error::internal(format!("function called against a wrong operation: {}", op))
 }
 
+/// Both `Operation::UpdateConfig` and `Operation::Update` can write to
+/// `manifest.table_metadata`; the conflict resolver compares their maps
+/// across either pairing.
+fn operation_table_metadata_updates(operation: &Operation) -> Option<&UpdateMap> {
+    match operation {
+        Operation::UpdateConfig {
+            table_metadata_updates,
+            ..
+        } => table_metadata_updates.as_ref(),
+        Operation::Update {
+            table_metadata_updates,
+            ..
+        } => table_metadata_updates.as_ref(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{num::NonZero, sync::Arc};
@@ -1692,7 +1722,9 @@ mod tests {
     use lance_table::io::deletion::{deletion_file_path, read_deletion_file};
 
     use super::*;
-    use crate::dataset::transaction::{DataReplacementGroup, RewriteGroup};
+    use crate::dataset::transaction::{
+        DataReplacementGroup, RewriteGroup, UpdateMap, UpdateMapEntry,
+    };
     use crate::dataset::write::WriteMode;
     use crate::session::caches::DeletionFileKey;
     use crate::{
@@ -1700,6 +1732,7 @@ mod tests {
         io,
     };
     use lance_table::format::DataFile;
+    use rstest::rstest;
 
     async fn test_dataset(num_rows: usize, num_fragments: usize) -> Dataset {
         let write_params = WriteParams {
@@ -1786,6 +1819,7 @@ mod tests {
             fields_for_preserving_frag_bitmap: vec![],
             update_mode: None,
             inserted_rows_filter: None,
+            table_metadata_updates: None,
         };
         let transaction = Transaction::new_from_version(1, operation);
         let other_operations = [
@@ -1798,6 +1832,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
             Operation::Delete {
                 deleted_fragment_ids: vec![3],
@@ -1813,6 +1848,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
         ];
         let other_transactions = other_operations.map(|op| Transaction::new_from_version(2, op));
@@ -1915,6 +1951,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
             Operation::Delete {
                 updated_fragments: vec![apply_deletion(&[1], &mut fragment, &dataset).await],
@@ -1930,6 +1967,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
         ];
         let transactions =
@@ -2052,6 +2090,7 @@ mod tests {
                     fields_for_preserving_frag_bitmap: vec![],
                     update_mode: None,
                     inserted_rows_filter: None,
+                    table_metadata_updates: None,
                 },
             ),
             (
@@ -2065,6 +2104,7 @@ mod tests {
                     fields_for_preserving_frag_bitmap: vec![],
                     update_mode: None,
                     inserted_rows_filter: None,
+                    table_metadata_updates: None,
                 },
             ),
             (
@@ -2225,6 +2265,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
             create_update_config_for_test(
                 Some(HashMap::from_iter(vec![(
@@ -2431,6 +2472,7 @@ mod tests {
                     fields_for_preserving_frag_bitmap: vec![],
                     update_mode: None,
                     inserted_rows_filter: None,
+                    table_metadata_updates: None,
                 },
                 [
                     Compatible,    // append
@@ -2953,6 +2995,7 @@ mod tests {
                 fields_for_preserving_frag_bitmap: vec![],
                 update_mode: None,
                 inserted_rows_filter: None,
+                table_metadata_updates: None,
             },
         ];
 
@@ -3605,5 +3648,115 @@ mod tests {
         );
 
         assert_eq!(dataset_v2.count_rows(None).await.unwrap(), 5);
+    }
+
+    /// Build a tx that writes `key` to `table_metadata` either via an
+    /// `Operation::Update`-bundled slot (rows + cursor atomic) or via a
+    /// dedicated `Operation::UpdateConfig` op.
+    fn metadata_txn(on_update: bool, key: &str, replace: bool) -> Transaction {
+        let map = UpdateMap {
+            update_entries: vec![UpdateMapEntry::from((key, "v"))],
+            replace,
+        };
+        let op = if on_update {
+            Operation::Update {
+                removed_fragment_ids: vec![],
+                updated_fragments: vec![],
+                new_fragments: vec![],
+                fields_modified: vec![],
+                merged_generations: vec![],
+                fields_for_preserving_frag_bitmap: vec![],
+                update_mode: None,
+                inserted_rows_filter: None,
+                table_metadata_updates: Some(map),
+            }
+        } else {
+            Operation::UpdateConfig {
+                config_updates: None,
+                table_metadata_updates: Some(map),
+                schema_metadata_updates: None,
+                field_metadata_updates: HashMap::new(),
+            }
+        };
+        Transaction::new_from_version(1, op)
+    }
+
+    /// Cross-kind `table_metadata_updates` collisions: `Operation::Update`
+    /// bundled slot vs. `Operation::UpdateConfig`, and Update-vs-Update, must
+    /// be surfaced by the centralized check in `check_txn`.
+    #[rstest]
+    #[case::update_disjoint(true, true, "c0", "c1", false, true)]
+    #[case::update_overlap(true, true, "c0", "c0", false, false)]
+    #[case::update_replace(true, true, "c0", "c1", true, false)]
+    #[case::cross_disjoint(true, false, "c0", "c1", false, true)]
+    #[case::cross_overlap(true, false, "c0", "c0", false, false)]
+    #[tokio::test]
+    async fn test_table_metadata_conflict(
+        #[case] lhs_on_update: bool,
+        #[case] rhs_on_update: bool,
+        #[case] key1: &str,
+        #[case] key2: &str,
+        #[case] replace1: bool,
+        #[case] expect_ok: bool,
+    ) {
+        let dataset = test_dataset(5, 1).await;
+        let txn1 = metadata_txn(lhs_on_update, key1, replace1);
+        let txn2 = metadata_txn(rhs_on_update, key2, false);
+
+        let mut rebase = TransactionRebase::try_new(&dataset, txn1, None)
+            .await
+            .unwrap();
+        let result = rebase.check_txn(&txn2, 2);
+        if expect_ok {
+            assert!(result.is_ok(), "expected ok, got {:?}", result);
+        } else {
+            assert!(
+                matches!(result, Err(Error::IncompatibleTransaction { .. })),
+                "expected IncompatibleTransaction, got {:?}",
+                result
+            );
+        }
+    }
+
+    /// Combined: row-level conflict on the same fragment plus a clashing
+    /// `table_metadata` key on two `Operation::Update` commits must surface as
+    /// `IncompatibleTransaction`. Otherwise `check_update_txn` early-returns
+    /// `RetryableCommitConflict` on the row conflict and the retry silently
+    /// rebase-overwrites the metadata slot.
+    #[tokio::test]
+    async fn test_metadata_conflict_beats_row_retry() {
+        let dataset = test_dataset(5, 1).await;
+        let map = |k: &str| UpdateMap {
+            update_entries: vec![UpdateMapEntry::from((k, "v"))],
+            replace: false,
+        };
+        let mk = |cursor: &str| {
+            Transaction::new_from_version(
+                1,
+                Operation::Update {
+                    // Same fragment on both sides forces a row-level conflict
+                    // through `check_update_txn`.
+                    removed_fragment_ids: vec![0],
+                    updated_fragments: vec![],
+                    new_fragments: vec![],
+                    fields_modified: vec![],
+                    merged_generations: vec![],
+                    fields_for_preserving_frag_bitmap: vec![],
+                    update_mode: None,
+                    inserted_rows_filter: None,
+                    table_metadata_updates: Some(map(cursor)),
+                },
+            )
+        };
+
+        let mut rebase = TransactionRebase::try_new(&dataset, mk("c0"), None)
+            .await
+            .unwrap();
+        let result = rebase.check_txn(&mk("c0"), 2);
+        assert!(
+            matches!(result, Err(Error::IncompatibleTransaction { .. })),
+            "expected IncompatibleTransaction, got {:?}",
+            result
+        );
     }
 }

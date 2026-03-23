@@ -2863,6 +2863,7 @@ mod tests {
             fields_for_preserving_frag_bitmap: vec![],
             update_mode: Some(UpdateMode::RewriteColumns),
             inserted_rows_filter: None,
+            table_metadata_updates: None,
         };
         let mut dataset1 = Dataset::commit(
             test_uri,
@@ -2936,6 +2937,7 @@ mod tests {
             fields_for_preserving_frag_bitmap: vec![],
             update_mode: Some(UpdateMode::RewriteColumns),
             inserted_rows_filter: None,
+            table_metadata_updates: None,
         };
         let dataset2 = Dataset::commit(
             test_uri,

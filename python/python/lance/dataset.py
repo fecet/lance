@@ -4966,6 +4966,11 @@ class LanceOperation:
         fields_for_preserving_frag_bitmap: list[int]
             The fields that used to judge whether to preserve the new frag's id into
             the frag bitmap of the specified indices.
+        table_metadata_updates: Optional[UpdateMap]
+            Atomic updates to the manifest's ``table_metadata`` applied
+            alongside the row changes in this commit. Lance's internal Update
+            writers leave this ``None``; set it to bundle a small durable slot
+            (e.g. a consumer cursor) with the data you produce.
         """
 
         removed_fragment_ids: List[int] = dataclasses.field(default_factory=list)
@@ -4978,6 +4983,7 @@ class LanceOperation:
             default_factory=list
         )
         update_mode: str = ""
+        table_metadata_updates: Optional["LanceOperation.UpdateMap"] = None
 
         def __post_init__(self):
             LanceOperation._validate_fragments(self.updated_fragments)

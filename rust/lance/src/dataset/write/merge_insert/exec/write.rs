@@ -928,6 +928,7 @@ impl ExecutionPlan for FullSchemaMergeInsertExec {
                     .collect(),
                 update_mode: Some(RewriteRows),
                 inserted_rows_filter: inserted_rows_filter.clone(),
+                table_metadata_updates: None,
             };
 
             // Step 5: Create and store the transaction

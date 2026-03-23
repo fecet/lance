@@ -285,6 +285,9 @@ impl FromPyObject<'_> for PyLance<Operation> {
                     .ok()
                     .map(|py_mode| py_mode.0);
 
+                let table_metadata_updates =
+                    extract_update_map(&ob.getattr("table_metadata_updates")?)?;
+
                 let op = Operation::Update {
                     removed_fragment_ids,
                     updated_fragments,
@@ -294,6 +297,7 @@ impl FromPyObject<'_> for PyLance<Operation> {
                     fields_for_preserving_frag_bitmap,
                     update_mode,
                     inserted_rows_filter: None,
+                    table_metadata_updates,
                 };
                 Ok(Self(op))
             }
@@ -445,6 +449,7 @@ impl<'py> IntoPyObject<'py> for PyLance<&Operation> {
                 fields_modified,
                 fields_for_preserving_frag_bitmap,
                 update_mode,
+                table_metadata_updates,
                 ..
             } => {
                 let removed_fragment_ids = removed_fragment_ids.into_pyobject(py)?;
@@ -465,6 +470,7 @@ impl<'py> IntoPyObject<'py> for PyLance<&Operation> {
                 let cls = namespace
                     .getattr("Update")
                     .expect("Failed to get Update class");
+                let table_metadata_updates = export_update_map(py, table_metadata_updates)?;
                 cls.call1((
                     removed_fragment_ids,
                     updated_fragments,
@@ -472,6 +478,7 @@ impl<'py> IntoPyObject<'py> for PyLance<&Operation> {
                     fields_modified,
                     fields_for_preserving_frag_bitmap,
                     update_mode,
+                    table_metadata_updates,
                 ))
             }
             Operation::DataReplacement { replacements } => {
