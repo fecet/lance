@@ -284,7 +284,20 @@ pub fn decode_h264_frames(blob: &[u8]) -> std::result::Result<Vec<u8>, String> {
         // Cleanup (frame and sws_ctx are thread-local cached, don't free)
         ffmpeg_sys_next::av_packet_free(&mut packet);
         ffmpeg_sys_next::avcodec_free_context(&mut (codec_ctx as *mut _));
+        // Save pb pointer before avformat_close_input frees fmt_ctx
+        let pb = (*fmt_ctx).pb;
         ffmpeg_sys_next::avformat_close_input(&mut fmt_ctx);
+        // Manually free user-allocated AVIO context and its buffer.
+        // avformat_close_input does NOT free a user-supplied pb.
+        if !pb.is_null() {
+            // Free the internal read buffer (allocated via av_malloc)
+            if !(*pb).buffer.is_null() {
+                ffmpeg_sys_next::av_freep(
+                    &mut (*pb).buffer as *mut *mut u8 as *mut std::ffi::c_void,
+                );
+            }
+            ffmpeg_sys_next::avio_context_free(&mut (pb as *mut _));
+        }
         drop(reader);
 
         Ok(rgb_data)
