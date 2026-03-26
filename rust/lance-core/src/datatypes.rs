@@ -53,6 +53,7 @@ pub static BLOB_V2_DESC_FIELDS: LazyLock<Fields> = LazyLock::new(|| {
         ArrowField::new("size", DataType::UInt64, false),
         ArrowField::new("blob_id", DataType::UInt32, false),
         ArrowField::new("blob_uri", DataType::Utf8, false),
+        ArrowField::new("ref_id", DataType::UInt32, true), // For inline blob deduplication
     ])
 });
 

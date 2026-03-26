@@ -77,6 +77,7 @@ bytes = "1.4"
 default = []
 datagen = ["lance-datagen"]
 fp16kernels = ["lance/fp16kernels"]
+video = ["lance/video"]
 
 [profile.ci]
 debug = "line-tables-only"

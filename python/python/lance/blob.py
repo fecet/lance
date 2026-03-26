@@ -19,12 +19,15 @@ class Blob:
     - inline bytes
     - an external URI with position and size, if position and size are not set,
       use the full uri.
+    Optionally, a ref_id can be provided for deduplication: rows with the same
+    ref_id will share the same blob storage (only the first occurrence stores data).
     """
 
     data: Optional[bytes] = None
     uri: Optional[str] = None
     position: Optional[int] = None
     size: Optional[int] = None
+    ref_id: Optional[int] = None  # For deduplication: same ref_id = shared blob
 
     def __post_init__(self) -> None:
         if self.data is not None and self.uri is not None:
@@ -43,8 +46,10 @@ class Blob:
             )
 
     @staticmethod
-    def from_bytes(data: Union[bytes, bytearray, memoryview]) -> "Blob":
-        return Blob(data=bytes(data))
+    def from_bytes(
+        data: Union[bytes, bytearray, memoryview], ref_id: Optional[int] = None
+    ) -> "Blob":
+        return Blob(data=bytes(data), ref_id=ref_id)
 
     @staticmethod
     def from_uri(uri: str, position: int = None, size: int = None) -> "Blob":
@@ -58,6 +63,13 @@ class Blob:
     def empty() -> "Blob":
         return Blob(data=b"")
 
+    @staticmethod
+    def ref(ref_id: int) -> "Blob":
+        """Create a blob that references another blob by ref_id (for deduplication)."""
+        if ref_id <= 0:
+            raise ValueError("ref_id must be positive")
+        return Blob(data=b"", ref_id=ref_id)
+
 
 class BlobType(pa.ExtensionType):
     """
@@ -65,6 +77,9 @@ class BlobType(pa.ExtensionType):
 
     This is the "logical" type users write. Lance will store it in a compact
     descriptor format, and reads will return descriptors by default.
+
+    The storage type includes an optional ref_id field for deduplication:
+    rows with the same ref_id share the same blob storage.
     """
 
     def __init__(self) -> None:
@@ -74,6 +89,7 @@ class BlobType(pa.ExtensionType):
                 pa.field("uri", pa.utf8(), nullable=True),
                 pa.field("position", pa.uint64(), nullable=True),
                 pa.field("size", pa.uint64(), nullable=True),
+                pa.field("ref_id", pa.uint32(), nullable=True),
             ]
         )
         pa.ExtensionType.__init__(self, storage_type, "lance.blob.v2")
@@ -119,6 +135,7 @@ class BlobArray(pa.ExtensionArray):
         uri_values: list[Optional[str]] = []
         position_values: list[Optional[int]] = []
         size_values: list[Optional[int]] = []
+        ref_id_values: list[Optional[int]] = []
         null_mask: list[bool] = []
 
         for v in values:
@@ -127,6 +144,7 @@ class BlobArray(pa.ExtensionArray):
                 uri_values.append(None)
                 position_values.append(None)
                 size_values.append(None)
+                ref_id_values.append(None)
                 null_mask.append(True)
                 continue
 
@@ -135,6 +153,7 @@ class BlobArray(pa.ExtensionArray):
                 uri_values.append(v.uri)
                 position_values.append(v.position)
                 size_values.append(v.size)
+                ref_id_values.append(v.ref_id)
                 null_mask.append(False)
                 continue
 
@@ -145,6 +164,7 @@ class BlobArray(pa.ExtensionArray):
                 uri_values.append(v)
                 position_values.append(None)
                 size_values.append(None)
+                ref_id_values.append(None)
                 null_mask.append(False)
                 continue
 
@@ -153,6 +173,7 @@ class BlobArray(pa.ExtensionArray):
                 uri_values.append(None)
                 position_values.append(None)
                 size_values.append(None)
+                ref_id_values.append(None)
                 null_mask.append(False)
                 continue
 
@@ -165,10 +186,11 @@ class BlobArray(pa.ExtensionArray):
         uri_arr = pa.array(uri_values, type=pa.utf8())
         position_arr = pa.array(position_values, type=pa.uint64())
         size_arr = pa.array(size_values, type=pa.uint64())
+        ref_id_arr = pa.array(ref_id_values, type=pa.uint32())
         mask_arr = pa.array(null_mask, type=pa.bool_())
         storage = pa.StructArray.from_arrays(
-            [data_arr, uri_arr, position_arr, size_arr],
-            names=["data", "uri", "position", "size"],
+            [data_arr, uri_arr, position_arr, size_arr, ref_id_arr],
+            names=["data", "uri", "position", "size", "ref_id"],
             mask=mask_arr,
         )
         return pa.ExtensionArray.from_storage(BlobType(), storage)  # type: ignore[return-value]
