@@ -228,9 +228,12 @@ impl FieldEncoder for BlobStructuralEncoder {
     }
 }
 
-/// Blob v2 structural encoder
+/// Blob v2 structural encoder with ref_id deduplication support
 pub struct BlobV2StructuralEncoder {
     descriptor_encoder: Box<dyn FieldEncoder>,
+    /// ref_id -> (position, size) temporary map for inline blob deduplication.
+    /// Lives only during one encode session, destroyed when Encoder is dropped.
+    ref_dedup_tmp_map: HashMap<u32, (u64, u64)>,
 }
 
 impl BlobV2StructuralEncoder {
@@ -258,7 +261,10 @@ impl BlobV2StructuralEncoder {
             Arc::new(HashMap::new()),
         )?);
 
-        Ok(Self { descriptor_encoder })
+        Ok(Self {
+            descriptor_encoder,
+            ref_dedup_tmp_map: HashMap::new(),
+        })
     }
 }
 
@@ -315,6 +321,11 @@ impl FieldEncoder for BlobV2StructuralEncoder {
             })?
             .as_primitive::<UInt64Type>();
 
+        // Optional ref_id column for inline blob deduplication
+        let ref_id_col = struct_arr
+            .column_by_name("ref_id")
+            .map(|c| c.as_primitive::<UInt32Type>());
+
         let row_count = struct_arr.len();
 
         let mut kind_builder = PrimitiveBuilder::<UInt8Type>::with_capacity(row_count);
@@ -322,8 +333,16 @@ impl FieldEncoder for BlobV2StructuralEncoder {
         let mut size_builder = PrimitiveBuilder::<UInt64Type>::with_capacity(row_count);
         let mut blob_id_builder = PrimitiveBuilder::<UInt32Type>::with_capacity(row_count);
         let mut uri_builder = StringBuilder::with_capacity(row_count, row_count * 16);
+        let mut ref_id_builder = PrimitiveBuilder::<UInt32Type>::with_capacity(row_count);
 
         for i in 0..row_count {
+            // Get ref_id if present (0 means no ref_id)
+            let ref_id = ref_id_col
+                .as_ref()
+                .filter(|col| !col.is_null(i))
+                .map(|col| col.value(i))
+                .unwrap_or(0);
+
             let (kind_value, position_value, size_value, blob_id_value, uri_value) =
                 if struct_arr.is_null(i) || kind_col.is_null(i) {
                     (BlobKind::Inline as u8, 0, 0, 0, "".to_string())
@@ -370,18 +389,52 @@ impl FieldEncoder for BlobV2StructuralEncoder {
                             "".to_string(),
                         ),
                         BlobKind::Inline => {
-                            let data_val = data_col.value(i);
-                            let blob_len = data_val.len() as u64;
-                            let position = external_buffers
-                                .add_buffer(LanceBuffer::from(Buffer::from(data_val)));
+                            // ref_id deduplication logic
+                            if ref_id > 0 {
+                                if let Some(&(cached_pos, cached_size)) =
+                                    self.ref_dedup_tmp_map.get(&ref_id)
+                                {
+                                    // Reuse cached position and size
+                                    (
+                                        BlobKind::Inline as u8,
+                                        cached_pos,
+                                        cached_size,
+                                        0,
+                                        "".to_string(),
+                                    )
+                                } else {
+                                    // First occurrence: store data and cache
+                                    let data_val = data_col.value(i);
+                                    let blob_len = data_val.len() as u64;
+                                    let position = external_buffers
+                                        .add_buffer(LanceBuffer::from(Buffer::from(data_val)));
 
-                            (
-                                BlobKind::Inline as u8,
-                                position,
-                                blob_len,
-                                0,
-                                "".to_string(),
-                            )
+                                    // Cache for future rows with same ref_id
+                                    self.ref_dedup_tmp_map.insert(ref_id, (position, blob_len));
+
+                                    (
+                                        BlobKind::Inline as u8,
+                                        position,
+                                        blob_len,
+                                        0,
+                                        "".to_string(),
+                                    )
+                                }
+                            } else {
+                                // No ref_id: store normally (original logic)
+                                let data_val = data_col.value(i);
+                                let blob_len = data_val.len() as u64;
+                                let position = external_buffers
+                                    .add_buffer(LanceBuffer::from(Buffer::from(data_val)));
+
+                                (
+                                    BlobKind::Inline as u8,
+                                    position,
+                                    blob_len,
+                                    0,
+                                    "".to_string(),
+                                )
+                            }
                         }
                     }
                 };
@@ -391,6 +444,7 @@ impl FieldEncoder for BlobV2StructuralEncoder {
             size_builder.append_value(size_value);
             blob_id_builder.append_value(blob_id_value);
             uri_builder.append_value(uri_value);
+            ref_id_builder.append_value(ref_id);
         }
         let children: Vec<ArrayRef> = vec![
             Arc::new(kind_builder.finish()),
@@ -398,6 +452,7 @@ impl FieldEncoder for BlobV2StructuralEncoder {
             Arc::new(size_builder.finish()),
             Arc::new(blob_id_builder.finish()),
             Arc::new(uri_builder.finish()),
+            Arc::new(ref_id_builder.finish()),
         ];
 
         let descriptor_array = Arc::new(StructArray::try_new(
@@ -548,6 +603,7 @@ mod tests {
         let blob_id_field = Arc::new(ArrowField::new("blob_id", DataType::UInt32, true));
         let blob_size_field = Arc::new(ArrowField::new("blob_size", DataType::UInt64, true));
         let position_field = Arc::new(ArrowField::new("position", DataType::UInt64, true));
+        let ref_id_field = Arc::new(ArrowField::new("ref_id", DataType::UInt32, true));
 
         let kind_array = UInt8Array::from(vec![
             BlobKind::Inline as u8,
@@ -563,6 +619,7 @@ mod tests {
         let blob_id_array = UInt32Array::from(vec![0, 0, 0]);
         let blob_size_array = UInt64Array::from(vec![0, 0, 0]);
         let position_array = UInt64Array::from(vec![0, 0, 0]);
+        let ref_id_array = UInt32Array::from(vec![0, 0, 0]);
 
         let struct_array = StructArray::from(vec![
             (kind_field, Arc::new(kind_array) as ArrayRef),
@@ -571,6 +628,7 @@ mod tests {
             (blob_id_field, Arc::new(blob_id_array) as ArrayRef),
             (blob_size_field, Arc::new(blob_size_array) as ArrayRef),
             (position_field, Arc::new(position_array) as ArrayRef),
+            (ref_id_field, Arc::new(ref_id_array) as ArrayRef),
         ]);
 
         let expected_descriptor = StructArray::from(vec![
@@ -602,6 +660,10 @@ mod tests {
                     "s3://bucket/blob",
                 ])) as ArrayRef,
             ),
+            (
+                Arc::new(ArrowField::new("ref_id", DataType::UInt32, true)),
+                Arc::new(UInt32Array::from(vec![0, 0, 0])) as ArrayRef,
+            ),
         ]);
 
         check_round_trip_encoding_of_data_with_expected(
@@ -626,6 +688,7 @@ mod tests {
         let blob_id_field = Arc::new(ArrowField::new("blob_id", DataType::UInt32, true));
         let blob_size_field = Arc::new(ArrowField::new("blob_size", DataType::UInt64, true));
         let position_field = Arc::new(ArrowField::new("position", DataType::UInt64, true));
+        let ref_id_field = Arc::new(ArrowField::new("ref_id", DataType::UInt32, true));
 
         let kind_array = UInt8Array::from(vec![BlobKind::Dedicated as u8, BlobKind::Inline as u8]);
         let data_array = LargeBinaryArray::from(vec![None, Some(b"abc".as_ref())]);
@@ -633,6 +696,7 @@ mod tests {
         let blob_id_array = UInt32Array::from(vec![42, 0]);
         let blob_size_array = UInt64Array::from(vec![12, 0]);
         let position_array = UInt64Array::from(vec![0, 0]);
+        let ref_id_array = UInt32Array::from(vec![0, 0]);
 
         let struct_array = StructArray::from(vec![
             (kind_field, Arc::new(kind_array) as ArrayRef),
@@ -641,6 +705,7 @@ mod tests {
             (blob_id_field, Arc::new(blob_id_array) as ArrayRef),
             (blob_size_field, Arc::new(blob_size_array) as ArrayRef),
             (position_field, Arc::new(position_array) as ArrayRef),
+            (ref_id_field, Arc::new(ref_id_array) as ArrayRef),
         ]);
 
         let expected_descriptor = StructArray::from(vec![
@@ -666,6 +731,10 @@ mod tests {
             (
                 Arc::new(ArrowField::new("blob_uri", DataType::Utf8, false)),
                 Arc::new(StringArray::from(vec!["", ""])) as ArrayRef,
+            ),
+            (
+                Arc::new(ArrowField::new("ref_id", DataType::UInt32, true)),
+                Arc::new(UInt32Array::from(vec![0, 0])) as ArrayRef,
             ),
         ]);
 
@@ -753,6 +822,7 @@ mod tests {
         let blob_id_field = Arc::new(ArrowField::new("blob_id", DataType::UInt32, true));
         let blob_size_field = Arc::new(ArrowField::new("blob_size", DataType::UInt64, true));
         let position_field = Arc::new(ArrowField::new("position", DataType::UInt64, true));
+        let ref_id_field = Arc::new(ArrowField::new("ref_id", DataType::UInt32, true));
 
         let kind_array = UInt8Array::from(vec![BlobKind::Packed as u8]);
         let data_array = LargeBinaryArray::from(vec![None::<&[u8]>]);
@@ -760,6 +830,7 @@ mod tests {
         let blob_id_array = UInt32Array::from(vec![7]);
         let blob_size_array = UInt64Array::from(vec![5]);
         let position_array = UInt64Array::from(vec![10]);
+        let ref_id_array = UInt32Array::from(vec![0]);
 
         let struct_array = StructArray::from(vec![
             (kind_field, Arc::new(kind_array) as ArrayRef),
@@ -768,6 +839,7 @@ mod tests {
             (blob_id_field, Arc::new(blob_id_array) as ArrayRef),
             (blob_size_field, Arc::new(blob_size_array) as ArrayRef),
             (position_field, Arc::new(position_array) as ArrayRef),
+            (ref_id_field, Arc::new(ref_id_array) as ArrayRef),
         ]);
 
         let expected_descriptor = StructArray::from(vec![
@@ -790,6 +862,10 @@ mod tests {
             (
                 Arc::new(ArrowField::new("blob_uri", DataType::Utf8, false)),
                 Arc::new(StringArray::from(vec![""])) as ArrayRef,
+            ),
+            (
+                Arc::new(ArrowField::new("ref_id", DataType::UInt32, true)),
+                Arc::new(UInt32Array::from(vec![0])) as ArrayRef,
             ),
         ]);
 

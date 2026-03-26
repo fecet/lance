@@ -1472,6 +1472,61 @@ impl Dataset {
         blob::take_blobs_by_addresses(self, &row_addrs, column.as_ref()).await
     }
 
+    /// Take blob data by row IDs with parallel I/O.
+    ///
+    /// Unlike `take_blobs` which returns lazy BlobFile handles, this function
+    /// reads all blob data in parallel and returns the actual bytes.
+    /// This is more efficient for batch reads, especially on cloud storage (S3/GCS/Azure).
+    ///
+    /// # Arguments
+    /// * `row_ids` - Row IDs to read
+    /// * `column` - The blob column name
+    /// * `concurrency` - Maximum number of concurrent I/O operations (default: 32)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let data = dataset.take_blobs_data(&[0, 1, 2], "video_column", 32).await?;
+    /// ```
+    pub async fn take_blobs_data(
+        self: &Arc<Self>,
+        row_ids: &[u64],
+        column: impl AsRef<str>,
+        concurrency: usize,
+    ) -> Result<Vec<bytes::Bytes>> {
+        blob::take_blobs_data(self, row_ids, column.as_ref(), concurrency).await
+    }
+
+    /// Take blob data by row indices with parallel I/O.
+    pub async fn take_blobs_data_by_indices(
+        self: &Arc<Self>,
+        row_indices: &[u64],
+        column: impl AsRef<str>,
+        concurrency: usize,
+    ) -> Result<Vec<bytes::Bytes>> {
+        blob::take_blobs_data_by_indices(self, row_indices, column.as_ref(), concurrency).await
+    }
+
+    /// Take blob data by row addresses with parallel I/O.
+    pub async fn take_blobs_data_by_addresses(
+        self: &Arc<Self>,
+        row_addrs: &[u64],
+        column: impl AsRef<str>,
+        concurrency: usize,
+    ) -> Result<Vec<bytes::Bytes>> {
+        blob::take_blobs_data_by_addresses(self, row_addrs, column.as_ref(), concurrency).await
+    }
+
+    /// Take blob data by row indices, decode H.264 video, return RGB bytes.
+    #[cfg(feature = "video")]
+    pub async fn take_blobs_decoded_by_indices(
+        self: &Arc<Self>,
+        row_indices: &[u64],
+        column: impl AsRef<str>,
+        concurrency: usize,
+    ) -> Result<Vec<bytes::Bytes>> {
+        blob::take_blobs_decoded_by_indices(self, row_indices, column.as_ref(), concurrency).await
+    }
+
     /// Get a stream of batches based on iterator of ranges of row numbers.
     ///
     /// This is an experimental API. It may change at any time.

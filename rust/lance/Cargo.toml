@@ -78,6 +78,7 @@ permutation = { version = "0.4.0" }
 tantivy.workspace = true
 aws-sdk-dynamodb = { workspace = true, optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 tracing.workspace = true
+rayon = { workspace = true, optional = true }
 humantime = { workspace = true }
 async_cell = "0.2.2"
 semver.workspace = true
@@ -127,6 +128,7 @@ cli = ["dep:clap", "lzma-sys/static"]
 dynamodb = ["lance-table/dynamodb", "dep:aws-sdk-dynamodb"]
 dynamodb_tests = ["dynamodb"]
 substrait = ["lance-datafusion/substrait"]
+video = ["lance-datafusion/video", "dep:rayon"]
 protoc = [
     "lance-encoding/protoc",
     "lance-file/protoc",
