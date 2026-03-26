@@ -336,6 +336,11 @@ impl BlobPreprocessor {
                 .column_by_name("size")
                 .map(|col| col.as_primitive::<UInt64Type>());
 
+            // Optional ref_id column for inline blob deduplication
+            let ref_id_col = struct_arr
+                .column_by_name("ref_id")
+                .map(|c| c.as_primitive::<arrow_array::types::UInt32Type>());
+
             let mut data_builder = LargeBinaryBuilder::with_capacity(struct_arr.len(), 0);
             let mut uri_builder = StringBuilder::with_capacity(struct_arr.len(), 0);
             let mut blob_id_builder =
@@ -345,10 +350,19 @@ impl BlobPreprocessor {
             let mut kind_builder = PrimitiveBuilder::<UInt8Type>::with_capacity(struct_arr.len());
             let mut position_builder =
                 PrimitiveBuilder::<arrow_array::types::UInt64Type>::with_capacity(struct_arr.len());
+            let mut ref_id_builder =
+                PrimitiveBuilder::<arrow_array::types::UInt32Type>::with_capacity(struct_arr.len());
 
             let struct_nulls = struct_arr.nulls();
 
             for i in 0..struct_arr.len() {
+                // Get ref_id if present (0 means no ref_id)
+                let ref_id = ref_id_col
+                    .as_ref()
+                    .filter(|col| !col.is_null(i))
+                    .map(|col| col.value(i))
+                    .unwrap_or(0);
+
                 if struct_arr.is_null(i) {
                     data_builder.append_null();
                     uri_builder.append_null();
@@ -356,6 +370,7 @@ impl BlobPreprocessor {
                     blob_size_builder.append_null();
                     kind_builder.append_null();
                     position_builder.append_null();
+                    ref_id_builder.append_null();
                     continue;
                 }
 
@@ -371,30 +386,37 @@ impl BlobPreprocessor {
                     .unwrap_or(false);
                 let data_len = if has_data { data_col.value(i).len() } else { 0 };
 
+                // When ref_id is set, always use Inline so the encoder's
+                // ref_cache can deduplicate. Dedicated/Packed paths bypass
+                // the cache and break ref_id sharing.
                 let dedicated_threshold = self.dedicated_thresholds[idx];
-                if has_data && data_len > dedicated_threshold {
-                    let blob_id = self.next_blob_id();
-                    self.write_dedicated(blob_id, data_col.value(i)).await?;
+                if ref_id == 0 {
+                    if has_data && data_len > dedicated_threshold {
+                        let blob_id = self.next_blob_id();
+                        self.write_dedicated(blob_id, data_col.value(i)).await?;
 
-                    kind_builder.append_value(BlobKind::Dedicated as u8);
-                    data_builder.append_null();
-                    uri_builder.append_null();
-                    blob_id_builder.append_value(blob_id);
-                    blob_size_builder.append_value(data_len as u64);
-                    position_builder.append_null();
-                    continue;
-                }
+                        kind_builder.append_value(BlobKind::Dedicated as u8);
+                        data_builder.append_null();
+                        uri_builder.append_null();
+                        blob_id_builder.append_value(blob_id);
+                        blob_size_builder.append_value(data_len as u64);
+                        position_builder.append_null();
+                        ref_id_builder.append_value(ref_id);
+                        continue;
+                    }
 
-                if has_data && data_len > INLINE_MAX {
-                    let (pack_blob_id, position) = self.write_packed(data_col.value(i)).await?;
+                    if has_data && data_len > INLINE_MAX {
+                        let (pack_blob_id, position) = self.write_packed(data_col.value(i)).await?;
 
-                    kind_builder.append_value(BlobKind::Packed as u8);
-                    data_builder.append_null();
-                    uri_builder.append_null();
-                    blob_id_builder.append_value(pack_blob_id);
-                    blob_size_builder.append_value(data_len as u64);
-                    position_builder.append_value(position);
-                    continue;
+                        kind_builder.append_value(BlobKind::Packed as u8);
+                        data_builder.append_null();
+                        uri_builder.append_null();
+                        blob_id_builder.append_value(pack_blob_id);
+                        blob_size_builder.append_value(data_len as u64);
+                        position_builder.append_value(position);
+                        ref_id_builder.append_value(ref_id);
+                        continue;
+                    }
                 }
 
                 if has_uri {
@@ -417,6 +439,7 @@ impl BlobPreprocessor {
                         blob_size_builder.append_null();
                         position_builder.append_null();
                     }
+                    ref_id_builder.append_value(ref_id);
                     continue;
                 }
 
@@ -428,6 +451,7 @@ impl BlobPreprocessor {
                     blob_id_builder.append_null();
                     blob_size_builder.append_null();
                     position_builder.append_null();
+                    ref_id_builder.append_value(ref_id);
                 } else {
                     data_builder.append_null();
                     uri_builder.append_null();
@@ -435,6 +459,7 @@ impl BlobPreprocessor {
                     blob_size_builder.append_null();
                     kind_builder.append_null();
                     position_builder.append_null();
+                    ref_id_builder.append_null();
                 }
             }
 
@@ -445,6 +470,7 @@ impl BlobPreprocessor {
                 arrow_schema::Field::new("blob_id", ArrowDataType::UInt32, true),
                 arrow_schema::Field::new("blob_size", ArrowDataType::UInt64, true),
                 arrow_schema::Field::new("position", ArrowDataType::UInt64, true),
+                arrow_schema::Field::new("ref_id", ArrowDataType::UInt32, true),
             ];
 
             let struct_array = arrow_array::StructArray::try_new(
@@ -456,6 +482,7 @@ impl BlobPreprocessor {
                     Arc::new(blob_id_builder.finish()),
                     Arc::new(blob_size_builder.finish()),
                     Arc::new(position_builder.finish()),
+                    Arc::new(ref_id_builder.finish()),
                 ],
                 struct_nulls.cloned(),
             )?;
@@ -857,7 +884,7 @@ fn blob_version_from_descriptions(descriptions: &StructArray) -> Result<BlobVers
     if fields.len() == 2 && fields[0].name() == "position" && fields[1].name() == "size" {
         return Ok(BlobVersion::V1);
     }
-    if fields.len() == 5
+    if (fields.len() == 5 || fields.len() == 6)
         && fields[0].name() == "kind"
         && fields[1].name() == "position"
         && fields[2].name() == "size"
@@ -1113,6 +1140,99 @@ async fn resolve_blob_read_location(
 fn data_file_key_from_path(path: &str) -> &str {
     let filename = path.rsplit('/').next().unwrap_or(path);
     filename.strip_suffix(".lance").unwrap_or(filename)
+}
+
+/// Take blob data by row IDs with parallel I/O.
+///
+/// Unlike `take_blobs` which returns lazy BlobFile handles, this function
+/// reads all blob data in parallel and returns the actual bytes.
+/// This is more efficient for batch reads, especially on cloud storage.
+pub async fn take_blobs_data(
+    dataset: &Arc<Dataset>,
+    row_ids: &[u64],
+    column: &str,
+    concurrency: usize,
+) -> Result<Vec<bytes::Bytes>> {
+    use futures::stream::{self, StreamExt};
+
+    let blob_files = take_blobs(dataset, row_ids, column).await?;
+
+    let results: Vec<Result<bytes::Bytes>> = stream::iter(blob_files)
+        .map(|blob| async move { blob.read().await })
+        .buffered(concurrency)
+        .collect()
+        .await;
+
+    results.into_iter().collect()
+}
+
+/// Take blob data by row indices with parallel I/O.
+pub async fn take_blobs_data_by_indices(
+    dataset: &Arc<Dataset>,
+    row_indices: &[u64],
+    column: &str,
+    concurrency: usize,
+) -> Result<Vec<bytes::Bytes>> {
+    use crate::dataset::take::row_offsets_to_row_addresses;
+
+    let row_addrs = row_offsets_to_row_addresses(dataset, row_indices).await?;
+    take_blobs_data_by_addresses(dataset, &row_addrs, column, concurrency).await
+}
+
+/// Take blob data by row addresses with parallel I/O.
+pub async fn take_blobs_data_by_addresses(
+    dataset: &Arc<Dataset>,
+    row_addrs: &[u64],
+    column: &str,
+    concurrency: usize,
+) -> Result<Vec<bytes::Bytes>> {
+    use futures::stream::{self, StreamExt};
+
+    let blob_files = take_blobs_by_addresses(dataset, row_addrs, column).await?;
+
+    let results: Vec<Result<bytes::Bytes>> = stream::iter(blob_files)
+        .map(|blob| async move { blob.read().await })
+        .buffered(concurrency)
+        .collect()
+        .await;
+
+    results.into_iter().collect()
+}
+
+/// Take blob data and decode H.264 video frames in Rust.
+///
+/// Returns decoded RGB24 bytes for each blob.
+/// Requires the `video` feature to be enabled.
+#[cfg(feature = "video")]
+pub async fn take_blobs_decoded_by_indices(
+    dataset: &Arc<Dataset>,
+    row_indices: &[u64],
+    column: &str,
+    concurrency: usize,
+) -> Result<Vec<bytes::Bytes>> {
+    let blobs = take_blobs_data_by_indices(dataset, row_indices, column, concurrency).await?;
+
+    let results: Vec<Result<bytes::Bytes>> = tokio::task::spawn_blocking(move || {
+        use rayon::prelude::*;
+        blobs
+            .into_par_iter()
+            .enumerate()
+            .map(|(i, blob)| {
+                lance_datafusion::udf::video::decode_h264_frames(&blob)
+                    .map(bytes::Bytes::from)
+                    .map_err(|e| Error::io(format!("decode_h264 failed on blob {i}: {e}")))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| Error::io(format!("decode task join error: {e}")))?;
+
+    let mut decoded = Vec::with_capacity(results.len());
+    for r in results {
+        decoded.push(r?);
+    }
+
+    Ok(decoded)
 }
 
 #[cfg(test)]

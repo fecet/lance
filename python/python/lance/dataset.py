@@ -1698,6 +1698,105 @@ class LanceDataset(pa.dataset.Dataset):
             raise ValueError("Either ids, addresses, or indices must be specified")
         return [BlobFile(lance_blob_file) for lance_blob_file in lance_blob_files]
 
+    def take_blobs_data(
+        self,
+        blob_column: str,
+        *,
+        ids: Optional[List[int]] = None,
+        addresses: Optional[List[int]] = None,
+        indices: Optional[List[int]] = None,
+        concurrency: int = 32,
+    ) -> List[bytes]:
+        """
+        Take blob data with parallel I/O.
+
+        Unlike take_blobs which returns lazy BlobFile handles, this function
+        reads all blob data in parallel and returns the actual bytes.
+        This is more efficient for batch reads, especially on cloud storage (S3/GCS).
+
+        Parameters
+        ----------
+        blob_column : str
+            The name of the blob column.
+        ids : List[int], optional
+            Row IDs to take.
+        addresses : List[int], optional
+            Row addresses to take (fragment_id << 32 | row_offset).
+        indices : List[int], optional
+            Row indices to take (0-based offsets).
+        concurrency : int, default 32
+            Maximum number of concurrent I/O operations.
+
+        Returns
+        -------
+        List[bytes]
+            List of blob data as bytes.
+        """
+        if sum([bool(v is not None) for v in [ids, addresses, indices]]) != 1:
+            raise ValueError(
+                "Exactly one of ids, indices, or addresses must be specified"
+            )
+
+        if ids is not None:
+            return self._ds.take_blobs_data(ids, blob_column, concurrency)
+        elif addresses is not None:
+            return self._ds.take_blobs_data_by_addresses(addresses, blob_column, concurrency)
+        elif indices is not None:
+            return self._ds.take_blobs_data_by_indices(indices, blob_column, concurrency)
+        else:
+            raise ValueError("Either ids, addresses, or indices must be specified")
+
+    def take_blobs_decoded(
+        self,
+        blob_column,
+        *,
+        indices: Optional[List[int]] = None,
+        concurrency: int = 32,
+    ):
+        """
+        Take blob data, decode H.264 video in Rust, return RGB bytes.
+
+        Each blob is decoded into raw RGB24 pixel data.
+        Requires lance to be built with the `video` feature.
+
+        Parameters
+        ----------
+        blob_column : str or List[str]
+            One or more blob column names.
+        indices : List[int]
+            Row indices to take (0-based offsets).
+        concurrency : int, default 32
+            Maximum number of concurrent I/O operations.
+
+        Returns
+        -------
+        List[bytes] if blob_column is str,
+        dict[str, List[bytes]] if blob_column is list.
+        """
+        if indices is None:
+            raise ValueError("indices must be specified")
+
+        # Dedup: only decode each unique index once, then expand back
+        seen = {}
+        unique_indices = []
+        for idx in indices:
+            if idx not in seen:
+                seen[idx] = len(unique_indices)
+                unique_indices.append(idx)
+        expand = [seen[idx] for idx in indices]
+
+        columns = [blob_column] if isinstance(blob_column, str) else blob_column
+        result = {}
+        for col in columns:
+            decoded = self._ds.take_blobs_decoded_by_indices(
+                unique_indices, col, concurrency
+            )
+            result[col] = [decoded[i] for i in expand]
+
+        if isinstance(blob_column, str):
+            return result[blob_column]
+        return result
+
     def head(self, num_rows, **kwargs):
         """
         Load the first N rows of the dataset.

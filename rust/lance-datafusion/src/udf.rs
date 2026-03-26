@@ -11,6 +11,8 @@ use datafusion_functions::utils::make_scalar_function;
 use std::sync::{Arc, LazyLock};
 
 pub mod json;
+#[cfg(feature = "video")]
+pub mod video;
 
 /// Register UDF functions to datafusion context.
 pub fn register_functions(ctx: &SessionContext) {
@@ -31,6 +33,8 @@ pub fn register_functions(ctx: &SessionContext) {
     lance_geo::register_functions(ctx);
     #[cfg(not(feature = "geo"))]
     register_geo_stub_functions(ctx);
+    #[cfg(feature = "video")]
+    ctx.register_udf(video::decode_h264_udf());
 }
 
 /// When the `geo` feature is disabled, register stub UDFs for spatial SQL functions

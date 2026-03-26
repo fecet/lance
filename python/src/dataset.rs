@@ -1301,6 +1301,113 @@ impl Dataset {
         Ok(blobs.into_iter().map(LanceBlobFile::from).collect())
     }
 
+    /// Take blob data by row IDs with parallel I/O.
+    ///
+    /// Unlike `take_blobs` which returns lazy BlobFile handles, this function
+    /// reads all blob data in parallel and returns the actual bytes.
+    /// This is more efficient for batch reads, especially on cloud storage.
+    ///
+    /// Parameters
+    /// ----------
+    /// row_ids : List[int]
+    ///     Row IDs to read
+    /// blob_column : str
+    ///     The blob column name
+    /// concurrency : int, optional
+    ///     Maximum number of concurrent I/O operations (default: 32)
+    ///
+    /// Returns
+    /// -------
+    /// List[bytes]
+    ///     List of blob data as bytes
+    #[pyo3(signature = (row_ids, blob_column, concurrency = 32))]
+    fn take_blobs_data<'py>(
+        self_: PyRef<'py, Self>,
+        row_ids: Vec<u64>,
+        blob_column: &str,
+        concurrency: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let data = rt()
+            .block_on(
+                Some(self_.py()),
+                self_.ds.take_blobs_data(&row_ids, blob_column, concurrency),
+            )?
+            .infer_error()?;
+        Ok(data
+            .into_iter()
+            .map(|bytes| PyBytes::new(self_.py(), &bytes))
+            .collect())
+    }
+
+    /// Take blob data by row indices with parallel I/O.
+    #[pyo3(signature = (row_indices, blob_column, concurrency = 32))]
+    fn take_blobs_data_by_indices<'py>(
+        self_: PyRef<'py, Self>,
+        row_indices: Vec<u64>,
+        blob_column: &str,
+        concurrency: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let data = rt()
+            .block_on(
+                Some(self_.py()),
+                self_
+                    .ds
+                    .take_blobs_data_by_indices(&row_indices, blob_column, concurrency),
+            )?
+            .infer_error()?;
+        Ok(data
+            .into_iter()
+            .map(|bytes| PyBytes::new(self_.py(), &bytes))
+            .collect())
+    }
+
+    /// Take blob data by row indices, decode H.264 video, return RGB bytes.
+    ///
+    /// Requires lance to be built with the `video` feature.
+    #[cfg(feature = "video")]
+    #[pyo3(signature = (row_indices, blob_column, concurrency = 32))]
+    fn take_blobs_decoded_by_indices<'py>(
+        self_: PyRef<'py, Self>,
+        row_indices: Vec<u64>,
+        blob_column: &str,
+        concurrency: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let data = rt()
+            .block_on(
+                Some(self_.py()),
+                self_
+                    .ds
+                    .take_blobs_decoded_by_indices(&row_indices, blob_column, concurrency),
+            )?
+            .infer_error()?;
+        Ok(data
+            .into_iter()
+            .map(|bytes| PyBytes::new(self_.py(), &bytes))
+            .collect())
+    }
+
+    /// Take blob data by row addresses with parallel I/O.
+    #[pyo3(signature = (row_addresses, blob_column, concurrency = 32))]
+    fn take_blobs_data_by_addresses<'py>(
+        self_: PyRef<'py, Self>,
+        row_addresses: Vec<u64>,
+        blob_column: &str,
+        concurrency: usize,
+    ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let data = rt()
+            .block_on(
+                Some(self_.py()),
+                self_
+                    .ds
+                    .take_blobs_data_by_addresses(&row_addresses, blob_column, concurrency),
+            )?
+            .infer_error()?;
+        Ok(data
+            .into_iter()
+            .map(|bytes| PyBytes::new(self_.py(), &bytes))
+            .collect())
+    }
+
     #[pyo3(signature = (row_slices, columns = None, batch_readahead = 10))]
     fn take_scan(
         &self,

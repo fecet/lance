@@ -37,6 +37,9 @@ tokio.workspace = true
 tracing.workspace = true
 # We only need this to pin the substrait version to 0.62.2 for now.
 substrait = {version = "=0.62.2", optional = true}
+ffmpeg-next = {version = "8.0", optional = true}
+ffmpeg-sys-next = {version = "8.0", optional = true}
+rayon = {version = "1", optional = true}
 
 [build-dependencies]
 prost-build.workspace = true
@@ -49,6 +52,7 @@ lance-datagen.workspace = true
 geo = ["dep:lance-geo"]
 substrait = ["dep:datafusion-substrait", "dep:substrait"]
 protoc = ["dep:protobuf-src"]
+video = ["dep:ffmpeg-next", "dep:ffmpeg-sys-next", "dep:rayon"]
 
 [lints]
 workspace = true
