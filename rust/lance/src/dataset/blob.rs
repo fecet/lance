@@ -1175,7 +1175,7 @@ pub async fn take_blobs_data_by_indices(
 ) -> Result<Vec<bytes::Bytes>> {
     use crate::dataset::take::row_offsets_to_row_addresses;
 
-    let row_addrs = row_offsets_to_row_addresses(dataset, row_indices).await?;
+    let row_addrs = row_offsets_to_row_addresses(&dataset.get_fragments(), row_indices).await?;
     take_blobs_data_by_addresses(dataset, &row_addrs, column, concurrency).await
 }
 
