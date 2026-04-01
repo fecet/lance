@@ -1356,24 +1356,62 @@ impl Dataset {
     ///
     /// Requires lance to be built with the `video` feature.
     #[cfg(feature = "video")]
-    #[pyo3(signature = (row_indices, blob_column, concurrency = 32))]
+    #[pyo3(signature = (row_indices, blob_column, concurrency = 32, target_frames = None))]
     fn take_blobs_decoded_by_indices<'py>(
         self_: PyRef<'py, Self>,
         row_indices: Vec<u64>,
         blob_column: &str,
         concurrency: usize,
+        target_frames: Option<Vec<usize>>,
     ) -> PyResult<Vec<Bound<'py, PyBytes>>> {
         let data = rt()
             .block_on(
                 Some(self_.py()),
                 self_
                     .ds
-                    .take_blobs_decoded_by_indices(&row_indices, blob_column, concurrency),
+                    .take_blobs_decoded_by_indices(
+                        &row_indices,
+                        blob_column,
+                        concurrency,
+                        target_frames.as_deref(),
+                    ),
             )?
             .infer_error()?;
         Ok(data
             .into_iter()
             .map(|bytes| PyBytes::new(self_.py(), &bytes))
+            .collect())
+    }
+
+    /// Take blob data from multiple columns, decode in one combined Rust call.
+    #[cfg(feature = "video")]
+    #[pyo3(signature = (row_indices, blob_columns, concurrency = 32, target_frames = None))]
+    fn take_blobs_decoded_multi_columns<'py>(
+        self_: PyRef<'py, Self>,
+        row_indices: Vec<u64>,
+        blob_columns: Vec<String>,
+        concurrency: usize,
+        target_frames: Option<Vec<usize>>,
+    ) -> PyResult<std::collections::HashMap<String, Vec<Bound<'py, PyBytes>>>> {
+        let col_refs: Vec<&str> = blob_columns.iter().map(|s| s.as_str()).collect();
+        let data = rt()
+            .block_on(
+                Some(self_.py()),
+                self_
+                    .ds
+                    .take_blobs_decoded_multi_columns(
+                        &row_indices,
+                        &col_refs,
+                        concurrency,
+                        target_frames.as_deref(),
+                    ),
+            )?
+            .infer_error()?;
+        Ok(data
+            .into_iter()
+            .map(|(col, blobs)| {
+                (col, blobs.into_iter().map(|b| PyBytes::new(self_.py(), &b)).collect())
+            })
             .collect())
     }
 
