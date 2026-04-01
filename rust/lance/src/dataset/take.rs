@@ -376,8 +376,8 @@ async fn do_take_rows(
             batch = batch.try_with_column(row_offset_field, row_offset_col)?;
         }
 
-        if builder.with_row_address {
-            // inject `ROW_ADDR` column
+        if builder.with_row_address && batch.schema().column_with_name(ROW_ADDR).is_none() {
+            // inject `ROW_ADDR` column (skip if already present in projection)
             let row_addr_field =
                 ArrowField::new(ROW_ADDR, arrow::datatypes::DataType::UInt64, false);
             batch = batch.try_with_column(row_addr_field, row_addr_col)?;

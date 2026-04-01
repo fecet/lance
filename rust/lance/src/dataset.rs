@@ -1518,14 +1518,29 @@ impl Dataset {
     }
 
     /// Take blob data by row indices, decode H.264 video, return RGB bytes.
+    ///
+    /// `target_frames`: if provided, only sws_scale the target frame per blob.
     #[cfg(feature = "video")]
     pub async fn take_blobs_decoded_by_indices(
         self: &Arc<Self>,
         row_indices: &[u64],
         column: impl AsRef<str>,
         concurrency: usize,
+        target_frames: Option<&[usize]>,
     ) -> Result<Vec<bytes::Bytes>> {
-        blob::take_blobs_decoded_by_indices(self, row_indices, column.as_ref(), concurrency).await
+        blob::take_blobs_decoded_by_indices(self, row_indices, column.as_ref(), concurrency, target_frames).await
+    }
+
+    /// Take blob data from multiple columns, decode H.264 video in one combined call.
+    #[cfg(feature = "video")]
+    pub async fn take_blobs_decoded_multi_columns(
+        self: &Arc<Self>,
+        row_indices: &[u64],
+        columns: &[&str],
+        concurrency: usize,
+        target_frames: Option<&[usize]>,
+    ) -> Result<std::collections::HashMap<String, Vec<bytes::Bytes>>> {
+        blob::take_blobs_decoded_multi_columns(self, row_indices, columns, concurrency, target_frames).await
     }
 
     /// Get a stream of batches based on iterator of ranges of row numbers.

@@ -1201,6 +1201,10 @@ pub async fn take_blobs_data_by_addresses(
 
 /// Take blob data and decode H.264 video frames in Rust.
 ///
+/// - `target_frames`: if `Some`, decode only the specified frame index per blob
+///   (sws_scale only that frame). Must have same length as `row_indices`.
+///   If `None`, decode all frames per blob (original behavior).
+///
 /// Returns decoded RGB24 bytes for each blob.
 /// Requires the `video` feature to be enabled.
 #[cfg(feature = "video")]
@@ -1209,20 +1213,34 @@ pub async fn take_blobs_decoded_by_indices(
     row_indices: &[u64],
     column: &str,
     concurrency: usize,
+    target_frames: Option<&[usize]>,
 ) -> Result<Vec<bytes::Bytes>> {
     let blobs = take_blobs_data_by_indices(dataset, row_indices, column, concurrency).await?;
 
+    // Phase 4: single blob — decode directly, skip spawn_blocking + rayon overhead
+    if blobs.len() == 1 {
+        let tf = target_frames.map(|tfs| tfs[0]);
+        let rgb = lance_datafusion::udf::video::decode_h264_frames(&blobs[0], tf)
+            .map(bytes::Bytes::from)
+            .map_err(|e| Error::io(format!("decode_h264 failed on blob 0: {e}")))?;
+        return Ok(vec![rgb]);
+    }
+
+    let target_frames_owned = target_frames.map(|tfs| tfs.to_vec());
     let results: Vec<Result<bytes::Bytes>> = tokio::task::spawn_blocking(move || {
         use rayon::prelude::*;
-        blobs
-            .into_par_iter()
-            .enumerate()
-            .map(|(i, blob)| {
-                lance_datafusion::udf::video::decode_h264_frames(&blob)
-                    .map(bytes::Bytes::from)
-                    .map_err(|e| Error::io(format!("decode_h264 failed on blob {i}: {e}")))
-            })
-            .collect()
+        lance_datafusion::udf::video::DECODE_POOL.install(|| {
+            blobs
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, blob)| {
+                    let tf = target_frames_owned.as_ref().map(|tfs| tfs[i]);
+                    lance_datafusion::udf::video::decode_h264_frames(&blob, tf)
+                        .map(bytes::Bytes::from)
+                        .map_err(|e| Error::io(format!("decode_h264 failed on blob {i}: {e}")))
+                })
+                .collect()
+        })
     })
     .await
     .map_err(|e| Error::io(format!("decode task join error: {e}")))?;
@@ -1233,6 +1251,72 @@ pub async fn take_blobs_decoded_by_indices(
     }
 
     Ok(decoded)
+}
+
+/// Phase 3: Take blob data from multiple columns and decode in one combined call.
+///
+/// Blob reads for all columns are issued in parallel, then all blobs are decoded
+/// together in a single rayon pass.
+#[cfg(feature = "video")]
+pub async fn take_blobs_decoded_multi_columns(
+    dataset: &Arc<Dataset>,
+    row_indices: &[u64],
+    columns: &[&str],
+    concurrency: usize,
+    target_frames: Option<&[usize]>,
+) -> Result<std::collections::HashMap<String, Vec<bytes::Bytes>>> {
+    // Parallel fetch for all columns
+    let fetch_futures: Vec<_> = columns.iter()
+        .map(|col| take_blobs_data_by_indices(dataset, row_indices, col, concurrency))
+        .collect();
+    let all_blobs: Vec<Vec<bytes::Bytes>> = futures::future::try_join_all(fetch_futures).await?;
+
+    // Flatten: (col_idx, blob_idx, blob_data)
+    let flat: Vec<(usize, usize, bytes::Bytes)> = all_blobs.into_iter()
+        .enumerate()
+        .flat_map(|(col_idx, blobs)| {
+            blobs.into_iter().enumerate().map(move |(blob_idx, blob)| (col_idx, blob_idx, blob))
+        })
+        .collect();
+
+    let n_cols = columns.len();
+    let n_blobs = row_indices.len();
+    let target_frames_owned = target_frames.map(|tfs| tfs.to_vec());
+
+    let flat_results: Vec<Result<(usize, usize, bytes::Bytes)>> =
+        tokio::task::spawn_blocking(move || {
+            use rayon::prelude::*;
+            lance_datafusion::udf::video::DECODE_POOL.install(|| {
+                flat.into_par_iter()
+                    .map(|(col_idx, blob_idx, blob)| {
+                        let tf = target_frames_owned.as_ref().map(|tfs| tfs[blob_idx]);
+                        let rgb = lance_datafusion::udf::video::decode_h264_frames(&blob, tf)
+                            .map(bytes::Bytes::from)
+                            .map_err(|e| Error::io(format!(
+                                "decode_h264 failed col={col_idx} blob={blob_idx}: {e}"
+                            )))?;
+                        Ok((col_idx, blob_idx, rgb))
+                    })
+                    .collect()
+            })
+        })
+        .await
+        .map_err(|e| Error::io(format!("decode task join error: {e}")))?;
+
+    // Reassemble into HashMap
+    let mut result: std::collections::HashMap<String, Vec<bytes::Bytes>> =
+        std::collections::HashMap::with_capacity(n_cols);
+    for col in columns {
+        let mut v = Vec::with_capacity(n_blobs);
+        v.resize(n_blobs, bytes::Bytes::new());
+        result.insert(col.to_string(), v);
+    }
+    for r in flat_results {
+        let (col_idx, blob_idx, rgb) = r?;
+        result.get_mut(columns[col_idx]).unwrap()[blob_idx] = rgb;
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
