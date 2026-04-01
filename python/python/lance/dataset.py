@@ -1752,6 +1752,7 @@ class LanceDataset(pa.dataset.Dataset):
         blob_column,
         *,
         indices: Optional[List[int]] = None,
+        target_frames: Optional[List[int]] = None,
         concurrency: int = 32,
     ):
         """
@@ -1766,6 +1767,10 @@ class LanceDataset(pa.dataset.Dataset):
             One or more blob column names.
         indices : List[int]
             Row indices to take (0-based offsets).
+        target_frames : List[int], optional
+            If provided, only sws_scale the target frame index per blob,
+            returning 1 frame of RGB data per blob. Must be same length as
+            indices. If None, decode all frames per blob.
         concurrency : int, default 32
             Maximum number of concurrent I/O operations.
 
@@ -1777,22 +1782,33 @@ class LanceDataset(pa.dataset.Dataset):
         if indices is None:
             raise ValueError("indices must be specified")
 
-        # Dedup: only decode each unique index once, then expand back
-        seen = {}
-        unique_indices = []
-        for idx in indices:
-            if idx not in seen:
-                seen[idx] = len(unique_indices)
-                unique_indices.append(idx)
-        expand = [seen[idx] for idx in indices]
-
         columns = [blob_column] if isinstance(blob_column, str) else blob_column
-        result = {}
-        for col in columns:
-            decoded = self._ds.take_blobs_decoded_by_indices(
-                unique_indices, col, concurrency
+
+        if len(columns) > 1:
+            # Multi-column: single combined Rust call (Phase 3)
+            result = self._ds.take_blobs_decoded_multi_columns(
+                indices, columns, concurrency, target_frames
             )
-            result[col] = [decoded[i] for i in expand]
+        else:
+            # Single column: dedup indices for efficiency
+            if target_frames is None:
+                seen = {}
+                unique_indices = []
+                for idx in indices:
+                    if idx not in seen:
+                        seen[idx] = len(unique_indices)
+                        unique_indices.append(idx)
+                expand = [seen[idx] for idx in indices]
+                decoded = self._ds.take_blobs_decoded_by_indices(
+                    unique_indices, columns[0], concurrency, None
+                )
+                result = {columns[0]: [decoded[i] for i in expand]}
+            else:
+                # With target_frames, skip dedup (index+frame pairs may differ)
+                decoded = self._ds.take_blobs_decoded_by_indices(
+                    indices, columns[0], concurrency, target_frames
+                )
+                result = {columns[0]: decoded}
 
         if isinstance(blob_column, str):
             return result[blob_column]
