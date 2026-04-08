@@ -12,14 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::LazyLock;
+
 use lance_namespace::error::NamespaceError;
 use pyo3::{
-    BoundObject, PyErr, PyResult, Python,
+    BoundObject, Py, PyAny, PyErr, PyResult, Python,
     exceptions::{PyIOError, PyNotImplementedError, PyRuntimeError, PyValueError},
     types::{PyAnyMethods, PyModule},
 };
 
 use lance::Error as LanceError;
+
+pub(crate) static PY_CONFLICT_ERROR: LazyLock<PyResult<Py<PyAny>>> = LazyLock::new(|| {
+    Python::attach(|py| {
+        py.import("lance")
+            .and_then(|lance| lance.getattr("commit"))
+            .and_then(|commit| commit.getattr("CommitConflictError"))
+            .map(|err| err.unbind())
+    })
+});
 
 /// Try to convert a NamespaceError to the corresponding Python exception.
 /// Returns the appropriate Python exception from lance_namespace.errors module.
@@ -66,6 +77,8 @@ pub trait PythonErrorExt<T> {
     fn not_implemented(self) -> PyResult<T>;
     /// Convert to PyIoError
     fn io_error(self) -> PyResult<T>;
+    /// Convert to lance.commit.CommitConflictError
+    fn commit_conflict_error(self) -> PyResult<T>;
 }
 
 impl<T> PythonErrorExt<T> for std::result::Result<T, LanceError> {
@@ -92,9 +105,26 @@ impl<T> PythonErrorExt<T> for std::result::Result<T, LanceError> {
                         self.runtime_error()
                     }
                 }
+                LanceError::CommitConflict { .. }
+                | LanceError::RetryableCommitConflict { .. } => self.commit_conflict_error(),
                 _ => self.runtime_error(),
             },
         }
+    }
+
+    fn commit_conflict_error(self) -> PyResult<T> {
+        self.map_err(|err| {
+            Python::attach(|py| match &*PY_CONFLICT_ERROR {
+                Ok(cls) => {
+                    let msg = err.to_string();
+                    match cls.bind(py).call1((msg.clone(),)) {
+                        Ok(exc) => PyErr::from_value(exc.into_bound()),
+                        Err(_) => PyIOError::new_err(msg),
+                    }
+                }
+                Err(_) => PyIOError::new_err(err.to_string()),
+            })
+        })
     }
 
     fn runtime_error(self) -> PyResult<T> {
